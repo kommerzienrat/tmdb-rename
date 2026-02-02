@@ -32,3 +32,8 @@ python3 tmdb-rename.py /path/to/collection
 - Video files smaller than 100 MB are ignored by default.
 - The script only renames supported video and subtitle extensions (`.mkv`, `.mp4`, `.avi`, `.m4v`, `.nfo`, `.srt`, etc.).
 - If you need to override automated matches, enter an IMDb or TMDb ID when prompted.
+
+## Creator & License
+
+- Created and maintained by [github.com/kommerzienrat](https://github.com/kommerzienrat).
+- Licensed under the MIT License (see `LICENSE`).

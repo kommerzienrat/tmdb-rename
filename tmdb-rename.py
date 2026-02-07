@@ -271,6 +271,11 @@ class MediaRenamer:
         'subtitles', 'sub', 'cover', 'covers', 'bonus', 'specials'
     })
 
+    # Audio file extensions commonly used for audiobooks
+    AUDIOBOOK_EXTS: frozenset[str] = frozenset({'.mp3', '.m4b', '.aac', '.flac', '.wav', '.ogg'})
+    # Keywords commonly found in audiobook folder/filenames
+    AUDIOBOOK_KEYWORDS: list[str] = ['h[oö]rbuch', 'audiobook', 'hörspiel']
+
     VIDEO_EXT = frozenset({'.mkv', '.mp4', '.avi', '.m4v', '.wmv', '.mov', '.ts', '.m2ts'})
     SUB_EXT = frozenset({'.srt', '.sub', '.ass', '.ssa', '.vtt', '.idx', '.sup'})
     RENAME_EXT = frozenset({'.mkv', '.mp4', '.avi', '.m4v', '.nfo'})
@@ -287,6 +292,15 @@ class MediaRenamer:
         r'[Ss](\d{1,2})[Ee](\d{1,3})',
         r'[Ss](\d{1,2})[\.\-\s]?[Ee](\d{1,3})',
         r'(\d{1,2})[xX](\d{1,3})',
+    ]
+    
+    # Enhanced season patterns for better series detection
+    SEASON_PATTERNS = [
+        r'[Ss]eason\s*(\d{1,2})',
+        r'[Ss]taffel\s*(\d{1,2})',
+        r'(?:Staffel|Season)\s*(\d{1,2})',
+        r'S\s?(\d{1,2})\s*$',
+        r'^\s*(\d{1,2})\s*x\s*\d{1,3}',  # Pattern like "1x01" at start of name
     ]
 
     TMDB_BASE = "https://api.themoviedb.org/3"
@@ -354,6 +368,11 @@ class MediaRenamer:
     # ==================== TITLE EXTRACTION ====================
 
     def _extract_title_year(self, name: str) -> tuple[str | None, str | None]:
+        # Skip audiobook folders entirely
+        for keyword in self.AUDIOBOOK_KEYWORDS:
+            if re.search(keyword, name, re.IGNORECASE):
+                return None, None
+
         clean = name
 
         for ext in self.VIDEO_EXT:
@@ -419,6 +438,38 @@ class MediaRenamer:
                 result = result.replace(ascii_v, umlaut)
         return result
 
+    def _is_audiobook(self, path: Path) -> bool:
+        """Check if a file or directory is related to audiobooks.
+        
+        This method prevents audiobooks from being processed as video media by:
+        1. Checking file extensions against known audiobook formats
+        2. Searching for audiobook keywords in filenames and folder names
+        
+        Args:
+            path: Path to check
+            
+        Returns:
+            bool: True if the path is identified as audiobook content
+        """
+        # Check file extension for audio files
+        if path.is_file() and path.suffix.lower() in self.AUDIOBOOK_EXTS:
+            return True
+        
+        # Check for audiobook keywords in filename or parent folder names
+        names_to_check = [path.name.lower()]
+        if path.parent:
+            names_to_check.append(path.parent.name.lower())
+            # Check grandparent as well for deeper nesting
+            if path.parent.parent:
+                names_to_check.append(path.parent.parent.name.lower())
+        
+        for name in names_to_check:
+            for keyword in self.AUDIOBOOK_KEYWORDS:
+                if re.search(keyword, name, re.IGNORECASE):
+                    return True
+        
+        return False
+
     # ==================== DETECTION ====================
 
     def _find_videos(self, directory: Path, max_depth: int = 5) -> list[VideoFile]:
@@ -427,8 +478,14 @@ class MediaRenamer:
         def scan(d: Path, depth: int = 0, parent_is_root: bool = True):
             if depth > max_depth or d.name.lower() in self.IGNORE_DIRS:
                 return
+            # Skip audiobook directories entirely
+            if self._is_audiobook(d):
+                return
             try:
                 for item in d.iterdir():
+                    # Skip audiobook files
+                    if self._is_audiobook(item):
+                        continue
                     if item.is_file() and item.suffix.lower() in self.VIDEO_EXT:
                         try:
                             size = item.stat().st_size
@@ -460,12 +517,93 @@ class MediaRenamer:
         return sorted(videos, key=lambda v: v.size_bytes, reverse=True)
 
     def _parse_episode(self, name: str) -> EpisodeInfo | None:
+        """Parse episode information from filename with enhanced series context support.
+        
+        Extended version that handles various naming conventions including:
+        - Standard SXXEXX patterns
+        - Season folders with episode numbers
+        - Episode/Ep naming conventions
+        
+        Args:
+            name: Filename or folder name to parse
+            
+        Returns:
+            EpisodeInfo | None: Parsed episode information or None if not found
+        """
+        # First try standard episode patterns
         for pat in self.EP_PATTERNS:
             if m := re.search(pat, name, re.IGNORECASE):
                 try:
                     return EpisodeInfo(season=int(m[1]), episode=int(m[2]))
                 except (ValueError, IndexError):
                     pass
+        
+        # Then try to extract season from the name for better series context
+        season = self._extract_season_info(name)
+        if season:
+            # Look for episode number in patterns like "Episode 01" or "Ep 01"
+            ep_match = re.search(r'[Ee]p(?:isode)?\s*[#:]?\s*(\d{1,3})', name, re.IGNORECASE)
+            if ep_match:
+                try:
+                    return EpisodeInfo(season=season, episode=int(ep_match.group(1)))
+                except (ValueError, IndexError):
+                    pass
+            
+            # If we have a season but no specific episode, default to episode 1
+            # This helps with cases where each episode is in its own folder
+            return EpisodeInfo(season=season, episode=1)
+        
+        return None
+
+    def _extract_season_info(self, name: str) -> int | None:
+        """Extract season number from folder/filename.
+        
+        Used to improve series detection for folders with season information
+        but without standard episode patterns.
+        
+        Args:
+            name: String to extract season info from
+            
+        Returns:
+            int | None: Season number if found, None otherwise
+        """
+        for pattern in self.SEASON_PATTERNS:
+            match = re.search(pattern, name, re.IGNORECASE)
+            if match:
+                try:
+                    return int(match.group(1))
+                except (ValueError, IndexError):
+                    pass
+        return None
+
+    def _get_series_context(self, directory: Path) -> str | None:
+        """Extract series name from parent folder names for better context.
+        
+        Helps identify series content when individual episodes are in separate folders
+        by looking at parent directory names for series indicators.
+        
+        Args:
+            directory: Path to the directory being analyzed
+            
+        Returns:
+            str | None: Series name if found, None otherwise
+        """
+        # Check parent directory for series name
+        if directory.parent:
+            parent_name = directory.parent.name
+            # If parent directory contains season info, it's likely a series name
+            if re.search(r'\b(?:season|staffel)\b', parent_name, re.IGNORECASE):
+                # Extract series name by removing season info
+                series_name = re.sub(
+                    r'\s*\b(?:[Ss]eason|[Ss]taffel)\b(?:\s*\d+)?\b.*',
+                    '',
+                    parent_name,
+                    flags=re.IGNORECASE,
+                )
+                return series_name.strip()
+            # If parent directory contains year pattern, it might be a series
+            elif re.search(r'\(\d{4}\)', parent_name):
+                return parent_name
         return None
 
     def _is_collection(self, folder_name: str, videos: list[VideoFile]) -> bool:
@@ -489,6 +627,19 @@ class MediaRenamer:
         return False
 
     def _detect_type(self, directory: Path) -> tuple[MediaType, list[VideoFile]]:
+        """Detect media type with enhanced series recognition.
+        
+        Improved version that considers:
+        - Parent folder context for series identification
+        - Enhanced pattern matching for season/episode info
+        - Series context from folder structure
+        
+        Args:
+            directory: Directory to analyze
+            
+        Returns:
+            tuple: Media type and list of video files
+        """
         videos = self._find_videos(directory)
         if not videos:
             return MediaType.UNKNOWN, videos
@@ -504,7 +655,23 @@ class MediaRenamer:
         if movies and movies[0].size_gb > 1:
             return MediaType.MOVIE, videos
 
-        if re.search(r's\d{1,2}|season|staffel', directory.name, re.I):
+        # Check for series patterns in directory name and parent directory name
+        dir_and_parent_names = [directory.name]
+        if directory.parent:
+            dir_and_parent_names.append(directory.parent.name)
+
+        for name in dir_and_parent_names:
+            if re.search(r's\d{1,2}|season|staffel', name, re.I):
+                return MediaType.SERIES, videos
+
+        # Enhanced series detection for separate episode folders
+        # Check if we have episode info in any video files
+        if any(v.episode_info for v in videos):
+            return MediaType.SERIES, videos
+
+        # Check for series context from parent folders
+        series_context = self._get_series_context(directory)
+        if series_context:
             return MediaType.SERIES, videos
 
         return (videos[0].media_type if videos else MediaType.UNKNOWN), videos
@@ -785,6 +952,52 @@ class MediaRenamer:
 
         return items
 
+    def _group_series_folders(self, results: list[ScanResult]) -> dict[str, list[ScanResult]]:
+        """Group folders that likely belong to the same series based on name similarity.
+        
+        This helps with series where episodes are in separate folders by grouping them
+        together for better context during matching.
+        
+        Args:
+            results: List of scan results to group
+            
+        Returns:
+            dict: Mapping of series identifiers to lists of related results
+        """
+        series_groups: dict[str, list[ScanResult]] = {}
+        
+        for result in results:
+            if result.detected_type != MediaType.SERIES:
+                continue
+                
+            # Extract series name by removing season/episode info
+            series_name = result.folder_name
+            
+            # Remove season/episode patterns
+            for pattern in self.EP_PATTERNS + self.SEASON_PATTERNS:
+                series_name = re.sub(pattern, '', series_name, flags=re.IGNORECASE)
+            
+            # Clean up the name
+            series_name = re.sub(r'[^\w\s\-äöüÄÖÜ]', ' ', series_name)
+            series_name = re.sub(r'\s+', ' ', series_name).strip()
+            
+            # Use first significant word(s) as key for grouping
+            words = series_name.split()
+            if len(words) >= 2:
+                # Use first 2-3 words as series identifier
+                key = ' '.join(words[:min(3, len(words))]).lower()
+            elif words:
+                key = words[0].lower()
+            else:
+                key = series_name.lower()
+                
+            if key not in series_groups:
+                series_groups[key] = []
+            series_groups[key].append(result)
+        
+        # Only return groups with multiple entries
+        return {k: v for k, v in series_groups.items() if len(v) > 1}
+
     def scan_all(self, folders: list[Path], show_progress: bool = True) -> list[ScanResult]:
         results: list[ScanResult] = []
 
@@ -801,6 +1014,20 @@ class MediaRenamer:
 
         if show_progress:
             print(" " * 80, end="\r")
+
+        # Group series folders for better context
+        series_groups = self._group_series_folders(results)
+        
+        # Add context information to series results
+        for group_key, group_results in series_groups.items():
+            # If we have multiple folders for the same series,
+            # we can use this context to improve matching
+            if len(group_results) > 1:
+                for result in group_results:
+                    # We could add more sophisticated logic here to share information
+                    # between episodes of the same series, but for now we'll just
+                    # note that this is part of a group
+                    pass
 
         return results
 

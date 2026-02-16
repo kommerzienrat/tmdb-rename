@@ -276,7 +276,7 @@ class MediaRenamer:
     # Audio file extensions commonly used for audiobooks
     AUDIOBOOK_EXTS: frozenset[str] = frozenset({'.mp3', '.m4b', '.aac', '.flac', '.wav', '.ogg'})
     # Keywords commonly found in audiobook folder/filenames
-    AUDIOBOOK_KEYWORDS: list[str] = ['h[oö]rbuch', 'audiobook', 'hörspiel']
+    AUDIOBOOK_KEYWORDS: list[str] = ['h[oö]rbuch', 'audiobook', 'hörspiel', 'hörbuch', 'audio book', 'hör-buch']
 
     VIDEO_EXT = frozenset({'.mkv', '.mp4', '.avi', '.m4v', '.wmv', '.mov', '.ts', '.m2ts'})
     SUB_EXT = frozenset({'.srt', '.sub', '.ass', '.ssa', '.vtt', '.idx', '.sup'})
@@ -467,6 +467,11 @@ class MediaRenamer:
         
         for name in names_to_check:
             for keyword in self.AUDIOBOOK_KEYWORDS:
+                # Prüfe auf genaue Übereinstimmung oder Übereinstimmung als separates Wort
+                if re.search(r'\b' + keyword + r'\b', name, re.IGNORECASE):
+                    return True
+                
+                # Zusätzliche Prüfung für Teile des Namens
                 if re.search(keyword, name, re.IGNORECASE):
                     return True
         
@@ -628,6 +633,31 @@ class MediaRenamer:
 
         return False
 
+    def _is_audiobook(self, directory: Path) -> bool:
+        """Check if directory contains audiobooks based on naming conventions.
+        
+        Args:
+            directory: Path to the directory being analyzed
+            
+        Returns:
+            bool: True if directory appears to contain audiobooks
+        """
+        names_to_check = [directory.name]
+        if directory.parent:
+            names_to_check.append(directory.parent.name)
+        
+        for name in names_to_check:
+            for keyword in self.AUDIOBOOK_KEYWORDS:
+                # Check for exact match or match as separate word
+                if re.search(r'\b' + keyword + r'\b', name, re.IGNORECASE):
+                    return True
+                
+                # Additional check for parts of the name
+                if re.search(keyword, name, re.IGNORECASE):
+                    return True
+        
+        return False
+
     def _detect_type(self, directory: Path) -> tuple[MediaType, list[VideoFile]]:
         """Detect media type with enhanced series recognition.
         
@@ -644,6 +674,10 @@ class MediaRenamer:
             tuple: Media type and list of video files
         """
         videos = self._find_videos(directory)
+        # Check if this is an audiobook directory
+        if self._is_audiobook(directory):
+            return MediaType.UNKNOWN, []
+            
         if not videos:
             return MediaType.UNKNOWN, videos
 
@@ -1102,7 +1136,7 @@ class MediaRenamer:
         """)
 
         while True:
-            choice = input("  Choice: ").strip().lower()
+            choice = input("  Choice (Enter=accept AUTO entries): ").strip().lower()
 
             if choice == 'q':
                 return []
@@ -1143,7 +1177,7 @@ class MediaRenamer:
                 print(f"    m = Enter manual ID")
 
                 while True:
-                    sel = input(f"\n  Choice [1]: ").strip().lower()
+                    sel = input(f"\n  Choice (Enter=1): ").strip().lower()
 
                     if sel == '0':
                         item.status = MatchStatus.SKIP
@@ -1171,7 +1205,7 @@ class MediaRenamer:
                     print("  ❌ Invalid")
             else:
                 print(f"\n  No matches. m = Manual, 0 = Skip")
-                sel = input("  Choice: ").strip().lower()
+                sel = input("  Choice (Enter=Skip): ").strip().lower()
 
                 if sel == 'm':
                     manual = input("  ID: ").strip()
@@ -1281,7 +1315,7 @@ class MediaRenamer:
     q        Quit
             """)
 
-            choice = input("  Choice: ").strip().lower()
+            choice = input("  Choice (Enter=handle uncertain items): ").strip().lower()
 
             if choice == 'q':
                 return results
@@ -1357,7 +1391,7 @@ class MediaRenamer:
                     print(f"\n    0 = Skip | m = Manual")
 
                     while True:
-                        sel = input(f"\n  Choice [1]: ").strip().lower()
+                        sel = input(f"\n  Choice (Enter=1): ").strip().lower()
 
                         if sel == '0':
                             result.status = MatchStatus.SKIP
@@ -1386,7 +1420,7 @@ class MediaRenamer:
 
                 else:
                     print(f"\n  No matches. m = Manual | 0 = Skip")
-                    sel = input("  Choice: ").strip().lower()
+                    sel = input("  Choice (Enter=Skip): ").strip().lower()
 
                     if sel == 'm':
                         manual = input("  ID: ").strip()
@@ -2094,7 +2128,7 @@ if __name__ == "__main__":
         """)
 
         while True:
-            choice = input("  Choice: ").strip().lower()
+            choice = input("  Choice (Enter=accept AUTO entries): ").strip().lower()
 
             if choice == 'q':
                 return []
@@ -2135,7 +2169,7 @@ if __name__ == "__main__":
                 print(f"    m = Enter manual ID")
 
                 while True:
-                    sel = input(f"\n  Choice [1]: ").strip().lower()
+                    sel = input(f"\n  Choice (Enter=1): ").strip().lower()
 
                     if sel == '0':
                         item.status = MatchStatus.SKIP
@@ -2163,7 +2197,7 @@ if __name__ == "__main__":
                     print("  ❌ Invalid")
             else:
                 print(f"\n  No matches. m = Manual, 0 = Skip")
-                sel = input("  Choice: ").strip().lower()
+                sel = input("  Choice (Enter=Skip): ").strip().lower()
 
                 if sel == 'm':
                     manual = input("  ID: ").strip()
@@ -2378,8 +2412,8 @@ if __name__ == "__main__":
 
                 else:
                     print(f"\n  No matches. m = Manual | 0 = Skip")
-                    sel = input("  Choice: ").strip().lower()
-
+                    sel = input("  Choice (Enter=Skip): ").strip().lower()
+    
                     if sel == 'm':
                         manual = input("  ID: ").strip()
                         match = self._manual_lookup(manual)

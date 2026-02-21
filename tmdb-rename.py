@@ -288,6 +288,7 @@ class MediaRenamer:
     VIDEO_EXT = frozenset({'.mkv', '.mp4', '.avi', '.m4v', '.wmv', '.mov', '.ts', '.m2ts'})
     SUB_EXT = frozenset({'.srt', '.sub', '.ass', '.ssa', '.vtt', '.idx', '.sup'})
     RENAME_EXT = frozenset({'.mkv', '.mp4', '.avi', '.m4v', '.nfo'})
+    SCENE_TRASH_EXT = frozenset({'.sfv', '.par2', '.md5', '.sha1', '.sha256', '.crc', '.diz'})
 
     LANG_MAP = {
         'ger': 'de', 'german': 'de', 'deu': 'de', 'deutsch': 'de',
@@ -1367,6 +1368,74 @@ class MediaRenamer:
         print(f"  {'#':>3}  {'St':>2}  {'Type':>4}  {'Folder':<35}  {'→ Match':<25}")
         print(f"{'─' * 80}")
 
+    def _build_series_batch_preview(
+        self,
+        results: list[ScanResult],
+        include_candidates: bool = False,
+    ) -> list[dict[str, object]]:
+        batches: dict[str, dict[str, object]] = {}
+
+        for result in results:
+            match = result.selected_match
+
+            if not match and include_candidates and result.detected_type == MediaType.SERIES and result.matches:
+                default_idx = self._default_match_index(result.matches, result.extracted_title, result.extracted_year)
+                match = result.matches[default_idx]
+
+            if not match:
+                continue
+
+            is_series = result.detected_type == MediaType.SERIES or match.media_type == 'tv'
+            if not is_series:
+                continue
+
+            title = match.title or match.original_title or result.extracted_title or result.folder_name
+            year = match.year or result.extracted_year or '0000'
+            imdb = match.imdb_id or ''
+
+            display_name = f"{title} ({year})"
+            if imdb:
+                display_name += f" [imdbid-{imdb}]"
+
+            entry = batches.setdefault(display_name, {
+                'imdb': imdb,
+                'folders': 0,
+                'seasons': set(),
+                'members': [],
+            })
+            entry['folders'] = int(entry['folders']) + 1
+            members = entry['members']
+            if isinstance(members, list):
+                members.append(result.folder_name)
+
+            if result.season_number:
+                seasons = entry['seasons']
+                if isinstance(seasons, set):
+                    seasons.add(result.season_number)
+
+        preview: list[dict[str, object]] = []
+        for name, info in batches.items():
+            imdb = str(info.get('imdb', ''))
+            folders = int(info.get('folders', 0))
+            seasons_obj = info.get('seasons', set())
+            seasons = seasons_obj if isinstance(seasons_obj, set) else set()
+            members_obj = info.get('members', [])
+            members = members_obj if isinstance(members_obj, list) else []
+            preview.append({
+                'imdb': imdb,
+                'name': name,
+                'folders': folders,
+                'seasons': seasons,
+                'members': members,
+            })
+
+        preview.sort(key=lambda item: (
+            1 if not str(item.get('imdb', '')) else 0,
+            str(item.get('imdb', '')),
+            str(item.get('name', '')).lower(),
+        ))
+        return preview
+
         for i, r in enumerate(results, 1):
             status_icon = r.status.value
             type_icons = {
@@ -1406,17 +1475,36 @@ class MediaRenamer:
             print(f"\n{'═' * 80}")
             print(f"  🔧 INTERACTIVE REVIEW")
             print(f"{'═' * 80}")
-            print(f"""
-  Status:
-    ✓ Ready: {len(ready)}   ? To review: {len(to_review)}   ✔ Done: {len(done)}
+            print(f"\n  Status:")
+            print(f"    ✓ Ready: {len(ready)}   ? To review: {len(to_review)}   ✔ Done: {len(done)}")
 
-  Commands:
-    <Enter>  Handle uncertain items ({len(to_review)})
-    x        Rename {len(ready)} now {'[DRY RUN]' if dry_run else '[EXECUTE]'}
-    1,3,5    Specific numbers
-    a        Review all
-    l        Show list
-    q        Quit
+            if self.series_batch_mode:
+                preview = self._build_series_batch_preview(results, include_candidates=True)
+                merge_groups = [p for p in preview if int(p.get('folders', 0)) > 1]
+                if merge_groups:
+                    print(f"\n  🔗 Series batch preview ({len(merge_groups)} merge group(s)):")
+                    for group in merge_groups:
+                        name = str(group.get('name', ''))
+                        folders = int(group.get('folders', 0))
+                        seasons_obj = group.get('seasons', set())
+                        seasons = seasons_obj if isinstance(seasons_obj, set) else set()
+                        season_text = self._format_season_summary(seasons)
+                        members_obj = group.get('members', [])
+                        members = members_obj if isinstance(members_obj, list) else []
+                        members_short = ", ".join(m[:18] for m in members[:3])
+                        more = " ..." if len(members) > 3 else ""
+                        print(f"    • {name[:56]} ← {folders} folders ({season_text})")
+                        print(f"      sources: {members_short}{more}")
+
+            print(f"""
+
+    Commands:
+        <Enter>  Handle uncertain items ({len(to_review)})
+        x        Rename {len(ready)} now {'[DRY RUN]' if dry_run else '[EXECUTE]'}
+        1,3,5    Specific numbers
+        a        Review all
+        l        Show list
+        q        Quit
             """)
 
             choice = input("  Choice (Enter=handle uncertain items): ").strip().lower()
@@ -1485,6 +1573,10 @@ class MediaRenamer:
                 if result.extracted_title:
                     print(f"  Detected: {result.extracted_title} ({result.extracted_year or '?'})")
 
+                if result.detected_type == MediaType.SERIES:
+                    season_target = result.season_number or 1
+                    print(f"  📺 Series recognized | planned target folder: Season {season_target:02d}")
+
                 if result.matches:
                     default_idx = self._default_match_index(result.matches, result.extracted_title, result.extracted_year)
                     print(f"\n  Matches:")
@@ -1495,6 +1587,11 @@ class MediaRenamer:
 
                     print(f"\n    0 = Skip | m = Manual")
                     print(f"    Enter = suggested #{default_idx + 1}")
+
+                    if result.detected_type == MediaType.SERIES:
+                        default_match = result.matches[default_idx]
+                        imdb_hint = default_match.imdb_id or "(IMDb pending)"
+                        print(f"    Batch candidate: {default_match.title} ({default_match.year}) [{imdb_hint}]")
 
                     while True:
                         sel = input(f"\n  Choice (Enter=suggested #{default_idx + 1}): ").strip().lower()
@@ -1599,29 +1696,23 @@ class MediaRenamer:
         season, _reason = self._season_inference_details(path, fallback=fallback)
         return season
 
-    def _organize_series_files(self, root_dir: Path, fallback_season: int | None = None) -> tuple[int, int]:
+    def _organize_series_files(self, root_dir: Path, fallback_season: int | None = None) -> tuple[int, set[int]]:
         moved_files = 0
         used_seasons: set[int] = set()
         episode_ext = self.VIDEO_EXT | self.SUB_EXT | frozenset({'.nfo'})
 
-        files = [
-            item for item in root_dir.rglob('*')
-            if item.is_file() and item.suffix.lower() in episode_ext
-        ]
+        def move_file_to_season(item: Path, season: int, reason: str) -> bool:
+            nonlocal moved_files
 
-        for item in files:
-            season, reason = self._season_inference_details(item, fallback=fallback_season)
             season_dir = root_dir / f"Season {season:02d}"
-            if not season_dir.exists():
-                season_dir.mkdir(parents=True, exist_ok=True)
-
+            season_dir.mkdir(parents=True, exist_ok=True)
             used_seasons.add(season)
-            target = season_dir / item.name
 
+            target = season_dir / item.name
             if item.parent == season_dir:
                 if self.debug_series:
                     print(f"     🧭 SERIES DEBUG: keep '{item.name}' in Season {season:02d} ({reason})")
-                continue
+                return False
 
             if target.exists():
                 stem = item.stem
@@ -1638,6 +1729,38 @@ class MediaRenamer:
             moved_files += 1
             if self.debug_series:
                 print(f"     🧭 SERIES DEBUG: move '{item.name}' -> 'Season {season:02d}/{target.name}' ({reason})")
+            return True
+
+        removed_junk = 0
+        for item in [p for p in root_dir.rglob('*') if p.is_file()]:
+            ext = item.suffix.lower()
+            if ext in self.SCENE_TRASH_EXT or self._is_sample_video(item):
+                try:
+                    item.unlink()
+                    removed_junk += 1
+                    if self.debug_series:
+                        print(f"     🧭 SERIES DEBUG: remove junk '{item.name}'")
+                except OSError:
+                    pass
+
+        files = [
+            item for item in root_dir.rglob('*')
+            if item.is_file() and item.suffix.lower() in episode_ext
+        ]
+        for item in files:
+            season, reason = self._season_inference_details(item, fallback=fallback_season)
+            move_file_to_season(item, season, reason)
+
+        remaining_files = [
+            p for p in root_dir.rglob('*')
+            if p.is_file()
+            and p.suffix.lower() in episode_ext
+            and p.parent != root_dir
+            and not re.fullmatch(r'Season\s\d{2}', p.parent.name)
+        ]
+        for item in remaining_files:
+            season, reason = self._season_inference_details(item, fallback=fallback_season)
+            move_file_to_season(item, season, f"rescan-{reason}")
 
         for folder in sorted((d for d in root_dir.rglob('*') if d.is_dir()), key=lambda d: len(d.parts), reverse=True):
             if folder == root_dir:
@@ -1651,6 +1774,9 @@ class MediaRenamer:
             except OSError:
                 pass
 
+        if removed_junk:
+            print(f"     🧹 Series cleanup: removed {removed_junk} junk/sample file(s)")
+
         return moved_files, used_seasons
 
     def _format_season_summary(self, seasons: set[int]) -> str:
@@ -1662,6 +1788,11 @@ class MediaRenamer:
             return f"Season {ordered[0]:02d}"
 
         return f"Seasons {ordered[0]:02d}-{ordered[-1]:02d}"
+
+    def _is_sample_video(self, path: Path) -> bool:
+        if path.suffix.lower() not in self.VIDEO_EXT:
+            return False
+        return bool(re.search(r'(^|[\._\-\s])sample([\._\-\s]|$)', path.stem, re.IGNORECASE))
 
     def execute_renames(self, results: list[ScanResult], dry_run: bool = True) -> tuple[int, int, int]:
         ok, skip, err = 0, 0, 0

@@ -45,6 +45,7 @@ Useful options:
 - Episode files are organized into `Season XX` folders under one series root.
 - Existing episode filenames are preserved (no forced renaming for episode files).
 - When multiple source folders (e.g. `S01`, `S02`, `S03`) match the same series, they are merged into one series root.
+- Scene leftovers are cleaned during series import (e.g. `sample` video files, `.sfv`, `.par2`, checksum sidecar files).
 - Console output includes:
    - `SERIES ROOT` when a new series root is created
    - `SERIES MERGE` when another source folder is merged into an existing root

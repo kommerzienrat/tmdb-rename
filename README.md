@@ -1,39 +1,62 @@
 # TMDb Rename Tool
 
-A small command-line helper that scans movie and series folders, finds matches on TMDb, and renames each folder (plus video files) to the standardized format `Title (Year) [imdbid-tt######]`.
+Command-line helper for renaming movie and TV folders using TMDb/IMDb metadata.
+
+Standard target format:
+
+- Movies: `Title (Year) [imdbid-tt######]`
+- Series root: `Series Title (Year) [imdbid-tt######]`
+- Series seasons inside root: `Season 01`, `Season 02`, ...
 
 ## Requirements
 
-- Python 3.10 or newer
-- A TMDb **API Read Access Token (v4 auth)**
+- Python 3.10+
+- TMDb API Read Access Token (v4 auth)
 
 ## Setup
 
-1. Obtain your TMDb token at https://www.themoviedb.org/settings/api.
-2. Export it for the current shell session:
-   ```sh
-   export TMDB_ACCESS_TOKEN="eyJ..."
-   ```
-   Or store it in `~/.tmdb_token` and make sure the file is readable only by you.
+1. Get your TMDb token: <https://www.themoviedb.org/settings/api>
+2. Configure token with one of these methods:
+
+```sh
+export TMDB_ACCESS_TOKEN="eyJ..."
+```
+
+or store it in `~/.tmdb_token`.
 
 ## Usage
 
 ```sh
-python3 tmdb-rename.py /path/to/collection
+python3 tmdb-rename.py /path/to/library
 ```
 
-- Add `-x` to execute the renaming instead of just previewing it (dry run).
-- Use `-n` to skip the interactive review and rename only automatically matched folders.
-- Pass `-s` to treat each provided path as a standalone folder rather than scanning its subdirectories.
-- Use `-t "token"` to override the environment/file token for a single run.
+Useful options:
 
-## Notes
+- `-x`, `--execute`  Perform real renaming (default is dry-run preview)
+- `-n`, `--no-interactive`  No prompts, process automatically matched entries
+- `-s`, `--single`  Treat each input path as one folder (no child-folder scan)
+- `-t`, `--token`  Override token for this run
+- `--debug-series`  Show detailed season inference/move decisions per file
+- `--no-series-batch`  Disable grouping of multiple season folders of same series
 
-- Video files smaller than 100 MB are ignored by default.
-- The script only renames supported video and subtitle extensions (`.mkv`, `.mp4`, `.avi`, `.m4v`, `.nfo`, `.srt`, etc.).
-- If you need to override automated matches, enter an IMDb or TMDb ID when prompted.
+## Series Handling
 
-## Creator & License
+- Season/episode patterns like `S01E02`, `1x02`, `E02`, `EP02`, `Folge 02`, `Episode 02` are recognized.
+- Episode files are organized into `Season XX` folders under one series root.
+- Existing episode filenames are preserved (no forced renaming for episode files).
+- When multiple source folders (e.g. `S01`, `S02`, `S03`) match the same series, they are merged into one series root.
+- Console output includes:
+   - `SERIES ROOT` when a new series root is created
+   - `SERIES MERGE` when another source folder is merged into an existing root
+   - `SERIES SUMMARY` at the end (sorted by IMDb ID)
 
-- Created and maintained by [github.com/kommerzienrat](https://github.com/kommerzienrat).
-- Licensed under the MIT License (see `LICENSE`).
+## Detection Notes
+
+- Audiobook/book-like folders are skipped.
+- Video files smaller than 100 MB are ignored.
+- Supported video/subtitle extensions are processed (`.mkv`, `.mp4`, `.avi`, `.m4v`, `.nfo`, `.srt`, ...).
+- Manual override remains available via IMDb or TMDb ID in interactive mode.
+
+## License
+
+- MIT (see [LICENSE](LICENSE))

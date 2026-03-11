@@ -333,6 +333,30 @@ class MediaRenamer:
         self.series_batch_mode = series_batch_mode
         self._ops: list[RenameOp] = []
         self._cache: dict[str, any] = {}
+        
+        # Manual mappings storage (folder_name -> imdb_id)
+        self._manual_mappings: dict[str, str] = {}
+        self._manual_mappings_file = Path.home() / ".tmdb_manual_mappings.json"
+        self._load_manual_mappings()
+
+    def _load_manual_mappings(self) -> None:
+        """Load manually saved IMDB mappings from JSON file."""
+        if self._manual_mappings_file.exists():
+            try:
+                with open(self._manual_mappings_file, 'r', encoding='utf-8') as f:
+                    self._manual_mappings = json.load(f)
+                print(f"  ✓ Loaded {len(self._manual_mappings)} manual mappings")
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"  ⚠ Failed to load manual mappings: {e}")
+                self._manual_mappings = {}
+
+    def _save_manual_mappings(self) -> None:
+        """Save manually entered IMDB mappings to JSON file."""
+        try:
+            with open(self._manual_mappings_file, 'w', encoding='utf-8') as f:
+                json.dump(self._manual_mappings, f, indent=2, ensure_ascii=False)
+        except IOError as e:
+            print(f"  ⚠ Failed to save manual mappings: {e}")
 
     def verify_api_connection(self) -> bool:
         """Tests the API connection."""
@@ -454,12 +478,20 @@ class MediaRenamer:
         return False
 
     def _to_umlauts(self, text: str) -> str:
+        """Convert ASCII representations of German umlauts to actual umlauts."""
         result = text
         for ascii_v, umlaut in self.UMLAUTS.items():
             if ascii_v == 'ue':
                 result = re.sub(r'(?<=[bcdfghjklmnpqrstvwxzBCDFGHJKLMNPQRSTVWXZ])ue', umlaut, result)
             else:
                 result = result.replace(ascii_v, umlaut)
+        return result
+
+    def _from_umlauts(self, text: str) -> str:
+        """Convert German umlauts to ASCII representations for search."""
+        result = text
+        for ascii_v, umlaut in self.UMLAUTS.items():
+            result = result.replace(umlaut, ascii_v)
         return result
 
     def _is_audiobook(self, path: Path) -> bool:
@@ -836,10 +868,17 @@ class MediaRenamer:
         variants.append((title, year))
         variants.append((title, None))
 
+        # Convert ASCII umlauts to actual umlauts (ue -> ü)
         title_umlaut = self._to_umlauts(title)
         if title_umlaut != title:
             variants.append((title_umlaut, year))
             variants.append((title_umlaut, None))
+
+        # Convert actual umlauts to ASCII (ü -> ue) - for searching English titles
+        title_ascii = self._from_umlauts(title)
+        if title_ascii != title:
+            variants.append((title_ascii, year))
+            variants.append((title_ascii, None))
 
         if ' And ' in title or ' and ' in title:
             title_amp = re.sub(r'\s+[Aa]nd\s+', ' & ', title)
@@ -928,10 +967,57 @@ class MediaRenamer:
 
         return results[:10]
 
+    def _lookup_by_tmdb_id(self, tmdb_id: int) -> MediaMatch | None:
+        """Look up a movie/TV show by TMDb ID."""
+        # Try as movie first
+        endpoint = f"/movie/{tmdb_id}"
+        params = {'language': 'de-DE'}
+        data = self._tmdb_request(endpoint, params)
+
+        if data and 'id' in data:
+            imdb_id = self._get_imdb_id(tmdb_id, 'movie')
+            return MediaMatch(
+                tmdb_id=tmdb_id,
+                imdb_id=imdb_id,
+                title=data.get('title', ''),
+                original_title=data.get('original_title', ''),
+                year=(data.get('release_date', '') or '')[:4],
+                media_type='movie'
+            )
+
+        # Try as TV series
+        endpoint = f"/tv/{tmdb_id}"
+        data = self._tmdb_request(endpoint, params)
+
+        if data and 'id' in data:
+            imdb_id = self._get_imdb_id(tmdb_id, 'tv')
+            return MediaMatch(
+                tmdb_id=tmdb_id,
+                imdb_id=imdb_id,
+                title=data.get('name', ''),
+                original_title=data.get('original_name', ''),
+                year=(data.get('first_air_date', '') or '')[:4],
+                media_type='tv'
+            )
+
+        return None
+
     def _manual_lookup(self, manual: str) -> MediaMatch | None:
         if not manual:
             return None
 
+        # Support explicit prefixes: imdb:tt1234567 or tmdb:12345
+        manual_lower = manual.lower()
+        if manual_lower.startswith('imdb:'):
+            manual = manual[5:]  # Remove 'imdb:' prefix
+        elif manual_lower.startswith('tmdb:'):
+            # TMDb ID - directly fetch
+            tmdb_id = manual[5:].strip()
+            if tmdb_id.isdigit():
+                return self._lookup_by_tmdb_id(int(tmdb_id))
+            return None
+        
+        # Check for tt prefix or 7+ digit IMDB ID
         if manual.startswith('tt') or (manual.isdigit() and len(manual) >= 7):
             if not manual.startswith('tt'):
                 manual = 'tt' + manual
@@ -955,36 +1041,37 @@ class MediaRenamer:
                             media_type='movie' if is_movie else 'tv'
                         )
 
-        if manual.isdigit():
-            tmdb_id = int(manual)
+        # For pure numeric input, use TMDb lookup (not IMDB)
+        # This is a short numeric ID, so it's clearly a TMDb ID
+        if manual.isdigit() and len(manual) < 7:
+            return self._lookup_by_tmdb_id(int(manual))
 
-            endpoint = f"/movie/{tmdb_id}"
-            params = {'language': 'de-DE'}
-            data = self._tmdb_request(endpoint, params)
-
-            if data and 'id' in data:
-                imdb_id = self._get_imdb_id(tmdb_id, 'movie')
+        # If manual input is a title (contains letters and spaces), search for it
+        if len(manual) > 2 and not manual.startswith('tt') and not manual.isdigit():
+            # Try searching as a movie title
+            search_results = self._search_tmdb(manual, None, MediaType.MOVIE)
+            if search_results:
+                best = search_results[0]
+                # Return match without IMDB validation - some TMDb entries have no IMDB
                 return MediaMatch(
-                    tmdb_id=tmdb_id,
-                    imdb_id=imdb_id,
-                    title=data.get('title', ''),
-                    original_title=data.get('original_title', ''),
-                    year=(data.get('release_date', '') or '')[:4],
-                    media_type='movie'
+                    tmdb_id=best.tmdb_id,
+                    imdb_id=best.imdb_id,  # May be None, that's okay
+                    title=best.title,
+                    original_title=best.original_title,
+                    year=best.year,
+                    media_type=best.media_type
                 )
-
-            endpoint = f"/tv/{tmdb_id}"
-            data = self._tmdb_request(endpoint, params)
-
-            if data and 'id' in data:
-                imdb_id = self._get_imdb_id(tmdb_id, 'tv')
+            # Try as TV series
+            search_results = self._search_tmdb(manual, None, MediaType.SERIES)
+            if search_results:
+                best = search_results[0]
                 return MediaMatch(
-                    tmdb_id=tmdb_id,
-                    imdb_id=imdb_id,
-                    title=data.get('name', ''),
-                    original_title=data.get('original_name', ''),
-                    year=(data.get('first_air_date', '') or '')[:4],
-                    media_type='tv'
+                    tmdb_id=best.tmdb_id,
+                    imdb_id=best.imdb_id,
+                    title=best.title,
+                    original_title=best.original_title,
+                    year=best.year,
+                    media_type=best.media_type
                 )
 
         return None
@@ -1063,8 +1150,28 @@ class MediaRenamer:
             result.error = "No title"
             return result
 
+        print(f"  [DEBUG] Searching TMDb for: title='{title}', year='{year}', type={detected_type}")
+        
         matches = self._search_tmdb(title, year, detected_type)
         result.matches = matches
+
+        print(f"  [DEBUG] Found {len(matches)} matches")
+        for i, m in enumerate(matches[:3]):
+            print(f"    [{i+1}] {m.title} ({m.year}) [tmdb={m.tmdb_id}, imdb={m.imdb_id}]")
+
+        # Check if we have a saved manual mapping for this folder
+        if folder_name in self._manual_mappings:
+            saved_imdb_id = self._manual_mappings[folder_name]
+            print(f"  [DEBUG] Found saved mapping: {saved_imdb_id}")
+            # Try to look up the saved IMDB ID
+            saved_match = self._manual_lookup(saved_imdb_id)
+            if saved_match:
+                result.selected_match = saved_match
+                result.status = MatchStatus.MANUAL
+                print(f"  ✓ Using saved match: {saved_match.title} ({saved_match.year}) [{saved_match.imdb_id}]")
+                return result
+            else:
+                print(f"  ⚠ Saved mapping not found in TMDb, will try search results")
 
         if not matches:
             result.status = MatchStatus.NONE
@@ -1288,13 +1395,20 @@ class MediaRenamer:
                         item.status = MatchStatus.SKIP
                         break
 
-                    if sel == 'm':
-                        manual = input("  ID (tt.../TMDb): ").strip()
+                    if sel == 'm' or sel == 'x':
+                        manual = input("  ID (tt.../TMDb/Titel): ").strip()
                         match = self._manual_lookup(manual)
                         if match:
                             item.selected_match = match
                             item.status = MatchStatus.MANUAL
-                            print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}]")
+                            # Save manual mapping for future runs
+                            folder_name = item.folder_path.name if item.folder_path else None
+                            if match.imdb_id and folder_name:
+                                self._manual_mappings[folder_name] = match.imdb_id
+                                self._save_manual_mappings()
+                                print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}] (saved)")
+                            else:
+                                print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}]")
                         else:
                             print("  ❌ Not found")
                         break
@@ -1309,16 +1423,23 @@ class MediaRenamer:
                         pass
                     print("  ❌ Invalid")
             else:
-                print(f"\n  No matches. m = Manual, 0 = Skip")
+                print(f"\n  No matches. m/x = Manual, 0 = Skip")
                 sel = input("  Choice (Enter=Skip): ").strip().lower()
 
-                if sel == 'm':
-                    manual = input("  ID: ").strip()
+                if sel == 'm' or sel == 'x':
+                    manual = input("  ID (tt.../TMDb/Titel): ").strip()
                     match = self._manual_lookup(manual)
                     if match:
                         item.selected_match = match
                         item.status = MatchStatus.MANUAL
-                        print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}]")
+                        # Save manual mapping for future runs
+                        folder_name = item.folder_path.name if item.folder_path else None
+                        if match.imdb_id and folder_name:
+                            self._manual_mappings[folder_name] = match.imdb_id
+                            self._save_manual_mappings()
+                            print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}] (saved)")
+                        else:
+                            print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}]")
                     else:
                         item.status = MatchStatus.SKIP
 
@@ -1585,7 +1706,7 @@ class MediaRenamer:
                         imdb_info = f" [{m.imdb_id}]" if m.imdb_id else ""
                         print(f"    {year_match} {j}. {m.title} ({m.year}){imdb_info}")
 
-                    print(f"\n    0 = Skip | m = Manual")
+                    print(f"\n    0 = Skip | m/x = Manual")
                     print(f"    Enter = suggested #{default_idx + 1}")
 
                     if result.detected_type == MediaType.SERIES:
@@ -1600,13 +1721,19 @@ class MediaRenamer:
                             result.status = MatchStatus.SKIP
                             break
 
-                        if sel == 'm':
-                            manual = input("  ID: ").strip()
+                        if sel == 'm' or sel == 'x':
+                            manual = input("  ID (tt.../TMDb/Titel): ").strip()
                             match = self._manual_lookup(manual)
                             if match:
                                 result.selected_match = match
                                 result.status = MatchStatus.MANUAL
-                                print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}]")
+                                # Save manual mapping for future runs
+                                if match.imdb_id:
+                                    self._manual_mappings[result.folder_name] = match.imdb_id
+                                    self._save_manual_mappings()
+                                    print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}] (saved)")
+                                else:
+                                    print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}]")
                             else:
                                 print("  ❌ Not found")
                             break
@@ -1622,15 +1749,20 @@ class MediaRenamer:
                         print("  ❌ Invalid")
 
                 else:
-                    print(f"\n  No matches. m = Manual | 0 = Skip")
+                    print(f"\n  No matches. m/x = Manual | 0 = Skip")
                     sel = input("  Choice (Enter=Skip): ").strip().lower()
 
-                    if sel == 'm':
-                        manual = input("  ID: ").strip()
+                    if sel == 'm' or sel == 'x':
+                        manual = input("  ID (tt.../TMDb/Titel): ").strip()
                         match = self._manual_lookup(manual)
                         if match:
                             result.selected_match = match
                             result.status = MatchStatus.MANUAL
+                            # Save manual mapping for future runs
+                            if match.imdb_id:
+                                self._manual_mappings[result.folder_name] = match.imdb_id
+                                self._save_manual_mappings()
+                                print(f"  ✓ Saved mapping: {match.title} -> {match.imdb_id}")
                         else:
                             result.status = MatchStatus.SKIP
                     else:
@@ -1854,15 +1986,16 @@ class MediaRenamer:
                 print(f"\n  🔍 Fetching IMDb ID for: {match.title} (TMDb: {match.tmdb_id})")
                 match.imdb_id = self._get_imdb_id(match.tmdb_id, match.media_type)
 
-            if not match.imdb_id:
-                print(f"\n  ❌ {result.folder_name}")
-                print(f"     No IMDb ID found (TMDb: {match.tmdb_id}, type: {match.media_type})")
-                err += 1
-                continue
+            # Allow films without IMDB if TMDb has no IMDB link
+            use_imdb_id = match.imdb_id
+            if not use_imdb_id:
+                print(f"  ⚠️ No IMDB ID available for: {match.title} (TMDb: {match.tmdb_id})")
+                print(f"     Will use TMDb ID instead")
+                use_imdb_id = f"tmdb{match.tmdb_id}"
 
-            if not re.match(r'^tt\d{7,}$', match.imdb_id):
+            if use_imdb_id.startswith('tt') and not re.match(r'^tt\d{7,}$', use_imdb_id):
                 print(f"\n  ❌ {result.folder_name}")
-                print(f"     Invalid IMDb ID: {match.imdb_id}")
+                print(f"     Invalid IMDb ID: {use_imdb_id}")
                 err += 1
                 continue
 
@@ -1870,7 +2003,7 @@ class MediaRenamer:
             year = match.year or '0000'
 
             try:
-                new_name = self._sanitize(f"{title} ({year}) [imdbid-{match.imdb_id}]")
+                new_name = self._sanitize(f"{title} ({year}) [imdbid-{use_imdb_id}]")
             except RenameError as e:
                 print(f"\n  ❌ {result.folder_name}: {e}")
                 err += 1

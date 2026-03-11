@@ -51,12 +51,23 @@ Useful options:
    - `SERIES MERGE` when another source folder is merged into an existing root
    - `SERIES SUMMARY` at the end (sorted by IMDb ID)
 
+## Manual Input
+
+When no match is found or you want to override, press `m` or `x`. You can enter:
+
+- **IMDb ID**: `tt0120188` or `imdb:tt0120188`
+- **TMDb ID**: `12345` or `tmdb:12345`
+- **Title**: `Movie Title` (triggers TMDb search)
+
+Manual mappings are saved to `~/.tmdb_manual_mappings.json` and automatically reused on future scans.
+
 ## Detection Notes
 
 - Audiobook/book-like folders are skipped.
 - Video files smaller than 100 MB are ignored.
 - Supported video/subtitle extensions are processed (`.mkv`, `.mp4`, `.avi`, `.m4v`, `.nfo`, `.srt`, ...).
-- Manual override remains available via IMDb or TMDb ID in interactive mode.
+- German umlauts (ü, ö, ä) are handled for both directions (ue → ü and ü → ue).
+- Films without IMDb link in TMDb are supported (uses tmdb-XXXXX format).
 
 ## License
 

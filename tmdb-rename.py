@@ -219,6 +219,10 @@ class MediaRenamer:
         r'\bWEBRip\b',
         r'\bWEB\b',
         r'\bWebHD\b',
+        r'\bAMZN\b',
+        r'\bNF\b',
+        r'\bHULU\b',
+        r'\bDSNY\b',
         r'\bDVDRip\b',
         r'\bDVD\b',
         r'\bHDTV\b',
@@ -257,6 +261,12 @@ class MediaRenamer:
         r'\bINTERNAL\b',
         r'\bLIMITED\b',
         r'-[A-Za-z0-9]+$',
+        # German title parts commonly found in releases
+        r'\bDie\s+Legende\s+der\s+Adlerkrieger\b',
+        r'\bDie\s+Legende\b',
+        r'\bDer\s+Legend\b',
+        r'\bDas\s+Abenteuer\b',
+        r'\bder\s+Adlerkrieger\b',
     ]
 
     END_ONLY_PATTERNS = [
@@ -462,6 +472,9 @@ class MediaRenamer:
 
         if not title or len(title) < 2:
             return None, year
+
+        # Convert ASCII umlauts to actual umlauts for better search results
+        title = self._to_umlauts(title)
 
         return title, year
 
@@ -1002,6 +1015,59 @@ class MediaRenamer:
 
         return None
 
+    def _manual_lookup_direct(self, manual: str, folder_name: str = "") -> MediaMatch | None:
+        """Create a MediaMatch directly from user input without TMDb lookup.
+        
+        This allows saving any ID the user provides, even if not found in TMDb.
+        """
+        if not manual:
+            return None
+        
+        # Clean the input
+        manual = manual.strip()
+        
+        # Determine if it's a TMDb or IMDB ID
+        if manual.startswith('tt'):
+            # IMDB ID
+            return MediaMatch(
+                tmdb_id=0,
+                imdb_id=manual,
+                title=folder_name,  # Use folder name as fallback title
+                original_title="",
+                year="",
+                media_type='movie'
+            )
+        elif manual.isdigit():
+            # Try TMDb API first - this gets us proper title/year
+            tmdb_result = self._lookup_by_tmdb_id(int(manual))
+            if tmdb_result:
+                return tmdb_result
+            
+            # Fallback: just save the ID without proper title
+            return MediaMatch(
+                tmdb_id=int(manual),
+                imdb_id=f"tmdb{manual}",  # Use tmdb prefix
+                title=folder_name,
+                original_title="",
+                year="",
+                media_type='movie'
+            )
+        elif manual.startswith('tmdb:'):
+            # TMDb ID with prefix
+            tmdb_id = manual[5:].strip()
+            if tmdb_id.isdigit():
+                return MediaMatch(
+                    tmdb_id=int(tmdb_id),
+                    imdb_id=f"tmdb{tmdb_id}",
+                    title=folder_name,
+                    original_title="",
+                    year="",
+                    media_type='movie'
+                )
+        
+        # If it's a title, search as last resort
+        return self._manual_lookup(manual)
+
     def _manual_lookup(self, manual: str) -> MediaMatch | None:
         if not manual:
             return None
@@ -1017,7 +1083,21 @@ class MediaRenamer:
                 return self._lookup_by_tmdb_id(int(tmdb_id))
             return None
         
-        # Check for tt prefix or 7+ digit IMDB ID
+        # For pure numeric input - ALWAYS treat as TMDb ID first
+        # TMDb IDs are typically 5-7 digits, IMDB IDs need 'tt' prefix
+        if manual.isdigit() and len(manual) >= 1:
+            # Try as TMDb ID
+            tmdb_result = self._lookup_by_tmdb_id(int(manual))
+            if tmdb_result:
+                return tmdb_result
+            
+            # If not found and starts with 0, try removing leading zero
+            if manual.startswith('0'):
+                tmdb_result = self._lookup_by_tmdb_id(int(manual.lstrip('0')))
+                if tmdb_result:
+                    return tmdb_result
+
+        # Check for tt prefix or 7+ digit IMDB ID (only if not already handled as TMDb)
         if manual.startswith('tt') or (manual.isdigit() and len(manual) >= 7):
             if not manual.startswith('tt'):
                 manual = 'tt' + manual
@@ -1040,11 +1120,6 @@ class MediaRenamer:
                             year=(item.get('release_date' if is_movie else 'first_air_date', '') or '')[:4],
                             media_type='movie' if is_movie else 'tv'
                         )
-
-        # For pure numeric input, use TMDb lookup (not IMDB)
-        # This is a short numeric ID, so it's clearly a TMDb ID
-        if manual.isdigit() and len(manual) < 7:
-            return self._lookup_by_tmdb_id(int(manual))
 
         # If manual input is a title (contains letters and spaces), search for it
         if len(manual) > 2 and not manual.startswith('tt') and not manual.isdigit():
@@ -1397,7 +1472,7 @@ class MediaRenamer:
 
                     if sel == 'm' or sel == 'x':
                         manual = input("  ID (tt.../TMDb/Titel): ").strip()
-                        match = self._manual_lookup(manual)
+                        match = self._manual_lookup_direct(manual, result.folder_name if result else "")
                         if match:
                             item.selected_match = match
                             item.status = MatchStatus.MANUAL
@@ -1428,7 +1503,12 @@ class MediaRenamer:
 
                 if sel == 'm' or sel == 'x':
                     manual = input("  ID (tt.../TMDb/Titel): ").strip()
-                    match = self._manual_lookup(manual)
+                else:
+                    # Allow direct ID input
+                    manual = sel if sel else None
+
+                if manual:
+                    match = self._manual_lookup_direct(manual, result.folder_name if result else "")
                     if match:
                         item.selected_match = match
                         item.status = MatchStatus.MANUAL
@@ -1441,6 +1521,7 @@ class MediaRenamer:
                         else:
                             print(f"  ✓ {match.title} ({match.year}) [{match.imdb_id}]")
                     else:
+                        print("  ❌ Not found")
                         item.status = MatchStatus.SKIP
 
         new_results: list[ScanResult] = []
@@ -1589,7 +1670,7 @@ class MediaRenamer:
                          if r.status in (MatchStatus.UNSURE, MatchStatus.NONE, MatchStatus.MANUAL)
                          and r.status != MatchStatus.RENAMED]
             ready = [i for i, r in enumerate(results)
-                     if r.status == MatchStatus.AUTO and r.selected_match]
+                     if r.status in (MatchStatus.AUTO, MatchStatus.MANUAL) and r.selected_match]
             done = [i for i, r in enumerate(results)
                     if r.status in (MatchStatus.RENAMED, MatchStatus.DONE)]
 
@@ -1642,7 +1723,7 @@ class MediaRenamer:
                 print(f"\n  Result: ✅ {ok}  ⏭️ {skip}  ❌ {err}")
 
                 for r in results:
-                    if r.status == MatchStatus.AUTO and r.selected_match and not dry_run:
+                    if r.status in (MatchStatus.AUTO, MatchStatus.MANUAL) and r.selected_match and not dry_run:
                         r.status = MatchStatus.RENAMED
 
                 if dry_run:
@@ -1723,7 +1804,7 @@ class MediaRenamer:
 
                         if sel == 'm' or sel == 'x':
                             manual = input("  ID (tt.../TMDb/Titel): ").strip()
-                            match = self._manual_lookup(manual)
+                            match = self._manual_lookup_direct(manual, result.folder_name if result else "")
                             if match:
                                 result.selected_match = match
                                 result.status = MatchStatus.MANUAL
@@ -1754,7 +1835,12 @@ class MediaRenamer:
 
                     if sel == 'm' or sel == 'x':
                         manual = input("  ID (tt.../TMDb/Titel): ").strip()
-                        match = self._manual_lookup(manual)
+                    else:
+                        # Allow direct ID input (e.g., user types tt0120188 directly)
+                        manual = sel if sel else None
+
+                    if manual:
+                        match = self._manual_lookup_direct(manual, result.folder_name if result else "")
                         if match:
                             result.selected_match = match
                             result.status = MatchStatus.MANUAL
@@ -1763,7 +1849,10 @@ class MediaRenamer:
                                 self._manual_mappings[result.folder_name] = match.imdb_id
                                 self._save_manual_mappings()
                                 print(f"  ✓ Saved mapping: {match.title} -> {match.imdb_id}")
+                            else:
+                                print(f"  ✓ Match: {match.title} ({match.year})")
                         else:
+                            print("  ❌ Not found")
                             result.status = MatchStatus.SKIP
                     else:
                         result.status = MatchStatus.SKIP
@@ -1989,11 +2078,11 @@ class MediaRenamer:
             # Allow films without IMDB if TMDb has no IMDB link
             use_imdb_id = match.imdb_id
             if not use_imdb_id:
+                # Only show warning but don't use tmdb prefix in filename
                 print(f"  ⚠️ No IMDB ID available for: {match.title} (TMDb: {match.tmdb_id})")
-                print(f"     Will use TMDb ID instead")
-                use_imdb_id = f"tmdb{match.tmdb_id}"
+                use_imdb_id = None
 
-            if use_imdb_id.startswith('tt') and not re.match(r'^tt\d{7,}$', use_imdb_id):
+            if use_imdb_id and use_imdb_id.startswith('tt') and not re.match(r'^tt\d{7,}$', use_imdb_id):
                 print(f"\n  ❌ {result.folder_name}")
                 print(f"     Invalid IMDb ID: {use_imdb_id}")
                 err += 1
@@ -2003,7 +2092,16 @@ class MediaRenamer:
             year = match.year or '0000'
 
             try:
-                new_name = self._sanitize(f"{title} ({year}) [imdbid-{use_imdb_id}]")
+                # Determine ID format: imdbid- for IMDB (tt...), tmdbid- for TMDb (numbers)
+                if use_imdb_id:
+                    if use_imdb_id.startswith('tt'):
+                        id_str = f"[imdbid-{use_imdb_id}]"
+                    else:
+                        # TMDb fallback
+                        id_str = f"[tmdbid-{match.tmdb_id}]" if match.tmdb_id else ""
+                    new_name = self._sanitize(f"{title} ({year}) {id_str}")
+                else:
+                    new_name = self._sanitize(f"{title} ({year})")
             except RenameError as e:
                 print(f"\n  ❌ {result.folder_name}: {e}")
                 err += 1
@@ -2275,7 +2373,7 @@ Environment variables:
         print(f"\n  ✅ {ok}  ⏭️ {skip}  ❌ {err}")
 
     if not args.execute:
-        ready = sum(1 for r in results if r.status == MatchStatus.AUTO and r.selected_match)
+        ready = sum(1 for r in results if r.status in (MatchStatus.AUTO, MatchStatus.MANUAL) and r.selected_match)
         if ready:
             print(f"\n  💡 Use -x to rename ({ready} ready)")
 

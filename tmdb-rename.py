@@ -17,11 +17,13 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
+from typing import Any, cast
 
 # ========== CONFIGURATION ==========
 
@@ -342,7 +344,7 @@ class MediaRenamer:
         self.debug_series = debug_series
         self.series_batch_mode = series_batch_mode
         self._ops: list[RenameOp] = []
-        self._cache: dict[str, any] = {}
+        self._cache: dict[str, Any] = {}
         
         # Manual mappings storage (folder_name -> imdb_id)
         self._manual_mappings: dict[str, str] = {}
@@ -393,8 +395,9 @@ class MediaRenamer:
         try:
             os.rename(src, dst)
         except OSError as e:
+            errno_value = e.errno if e.errno is not None else 0
             msg = {errno.EXDEV: "Cross-device", errno.EACCES: "Access denied",
-                   errno.EPERM: "Permission denied"}.get(e.errno, f"OS error {e.errno}")
+                   errno.EPERM: "Permission denied"}.get(errno_value, f"OS error {e.errno}")
             raise RenameError(f"{msg}: {src.name}")
 
     def _do_rename(self, old: Path, new: Path) -> None:
@@ -1456,8 +1459,12 @@ class MediaRenamer:
                 print(f"\n  Matches:")
                 for j, m in enumerate(item.matches[:6], 1):
                     marker = "▶" if (j - 1) == default_idx else " "
-                    imdb_info = f" [{m.imdb_id}]" if m.imdb_id else ""
-                    print(f"    {marker} {j}. {m.title} ({m.year}){imdb_info}")
+                    id_info = ""
+                    if m.imdb_id:
+                        id_info = f" [imdbid-{m.imdb_id}]"
+                    if m.tmdb_id:
+                        id_info += f" [tmdbid-{m.tmdb_id}]"
+                    print(f"    {marker} {j}. {m.title} ({m.year}){id_info}")
 
                 print(f"\n    0 = Skip")
                 print(f"    m = Enter manual ID")
@@ -1574,8 +1581,8 @@ class MediaRenamer:
         self,
         results: list[ScanResult],
         include_candidates: bool = False,
-    ) -> list[dict[str, object]]:
-        batches: dict[str, dict[str, object]] = {}
+    ) -> list[dict[str, Any]]:
+        batches: dict[str, dict[str, Any]] = {}
 
         for result in results:
             match = result.selected_match
@@ -1605,7 +1612,7 @@ class MediaRenamer:
                 'seasons': set(),
                 'members': [],
             })
-            entry['folders'] = int(entry['folders']) + 1
+            entry['folders'] = int(entry['folders']) + 1  # type: ignore[union-attr]
             members = entry['members']
             if isinstance(members, list):
                 members.append(result.folder_name)
@@ -1615,10 +1622,10 @@ class MediaRenamer:
                 if isinstance(seasons, set):
                     seasons.add(result.season_number)
 
-        preview: list[dict[str, object]] = []
+        preview: list[dict[str, Any]] = []
         for name, info in batches.items():
             imdb = str(info.get('imdb', ''))
-            folders = int(info.get('folders', 0))
+            folders = int(info['folders'])  # type: ignore[arg-type]
             seasons_obj = info.get('seasons', set())
             seasons = seasons_obj if isinstance(seasons_obj, set) else set()
             members_obj = info.get('members', [])
@@ -1637,31 +1644,6 @@ class MediaRenamer:
             str(item.get('name', '')).lower(),
         ))
         return preview
-
-        for i, r in enumerate(results, 1):
-            status_icon = r.status.value
-            type_icons = {
-                MediaType.MOVIE: "🎬", MediaType.SERIES: "📺",
-                MediaType.COLLECTION: "📦", MediaType.UNKNOWN: "❓"
-            }
-            type_icon = type_icons.get(r.detected_type, "?")
-
-            folder_short = r.folder_name[:33] + ".." if len(r.folder_name) > 35 else r.folder_name
-
-            if r.selected_match:
-                match_str = f"{r.selected_match.title[:20]} ({r.selected_match.year})"
-            elif r.status == MatchStatus.RENAMED:
-                match_str = "✔ Renamed"
-            elif r.error:
-                match_str = f"[{r.error[:20]}]"
-            elif r.matches:
-                match_str = f"[{len(r.matches)} matches]"
-            else:
-                match_str = "-"
-
-            print(f"  {i:>3}  {status_icon:>2}  {type_icon:>3}  {folder_short:<35}  {match_str:<25}")
-
-        print(f"{'─' * 80}")
 
     def interactive_review(self, results: list[ScanResult], dry_run: bool = True) -> list[ScanResult]:
 
@@ -1682,12 +1664,12 @@ class MediaRenamer:
 
             if self.series_batch_mode:
                 preview = self._build_series_batch_preview(results, include_candidates=True)
-                merge_groups = [p for p in preview if int(p.get('folders', 0)) > 1]
+                merge_groups = [p for p in preview if int(p['folders']) > 1]  # type: ignore[arg-type]
                 if merge_groups:
                     print(f"\n  🔗 Series batch preview ({len(merge_groups)} merge group(s)):")
                     for group in merge_groups:
                         name = str(group.get('name', ''))
-                        folders = int(group.get('folders', 0))
+                        folders = int(group['folders'])  # type: ignore[arg-type]
                         seasons_obj = group.get('seasons', set())
                         seasons = seasons_obj if isinstance(seasons_obj, set) else set()
                         season_text = self._format_season_summary(seasons)
@@ -1784,16 +1766,26 @@ class MediaRenamer:
                     print(f"\n  Matches:")
                     for j, m in enumerate(result.matches[:8], 1):
                         year_match = "▶" if (j - 1) == default_idx else " "
-                        imdb_info = f" [{m.imdb_id}]" if m.imdb_id else ""
-                        print(f"    {year_match} {j}. {m.title} ({m.year}){imdb_info}")
+                        id_info = ""
+                        if m.imdb_id:
+                            id_info = f" [imdbid-{m.imdb_id}]"
+                        if m.tmdb_id:
+                            id_info += f" [tmdbid-{m.tmdb_id}]"
+                        print(f"    {year_match} {j}. {m.title} ({m.year}){id_info}")
 
                     print(f"\n    0 = Skip | m/x = Manual")
                     print(f"    Enter = suggested #{default_idx + 1}")
 
                     if result.detected_type == MediaType.SERIES:
                         default_match = result.matches[default_idx]
-                        imdb_hint = default_match.imdb_id or "(IMDb pending)"
-                        print(f"    Batch candidate: {default_match.title} ({default_match.year}) [{imdb_hint}]")
+                        id_info = ""
+                        if default_match.imdb_id:
+                            id_info = f" [imdbid-{default_match.imdb_id}]"
+                        if default_match.tmdb_id:
+                            id_info += f" [tmdbid-{default_match.tmdb_id}]"
+                        if not id_info:
+                            id_info = " (IMDb pending)"
+                        print(f"    Batch candidate: {default_match.title} ({default_match.year}){id_info}")
 
                     while True:
                         sel = input(f"\n  Choice (Enter=suggested #{default_idx + 1}): ").strip().lower()
@@ -2017,7 +2009,7 @@ class MediaRenamer:
 
     def execute_renames(self, results: list[ScanResult], dry_run: bool = True) -> tuple[int, int, int]:
         ok, skip, err = 0, 0, 0
-        series_stats: dict[str, dict[str, object]] = {}
+        series_stats: dict[str, dict[str, Any]] = {}
 
         to_rename = [r for r in results
                      if r.status in (MatchStatus.AUTO, MatchStatus.MANUAL)
@@ -2121,7 +2113,7 @@ class MediaRenamer:
                     'seasons': set(),
                     'imdb_id': match.imdb_id or '',
                 })
-                stats['folders'] = int(stats['folders']) + 1
+                stats['folders'] = int(stats['folders']) + 1  # type: ignore[union-attr]
                 if result.season_number:
                     cast_seasons = stats['seasons']
                     if isinstance(cast_seasons, set):
@@ -2231,7 +2223,7 @@ class MediaRenamer:
             )
 
             for series_name, stats in sorted_items:
-                folders = int(stats.get('folders', 0))
+                folders = int(stats['folders'])  # type: ignore[arg-type]
                 seasons_obj = stats.get('seasons', set())
                 seasons = seasons_obj if isinstance(seasons_obj, set) else set()
                 season_text = self._format_season_summary(seasons)

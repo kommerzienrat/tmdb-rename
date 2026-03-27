@@ -29,6 +29,7 @@ from typing import Any, cast
 
 MAX_PATH_LENGTH = 250
 MIN_VIDEO_SIZE_MB = 100
+MAIN_MOVIE_SIZE_RATIO = 1.1  # Minimum size ratio to consider a file as main movie (10% larger)
 
 # ===================================
 
@@ -1645,6 +1646,22 @@ class MediaRenamer:
         print(f"  {'#':>3}  {'St':>2}  {'Type':>4}  {'Folder':<35}  {'→ Match':<25}")
         print(f"{'─' * 80}")
 
+        for i, r in enumerate(results, 1):
+            status = r.status.value
+            mtype = r.detected_type.name[:4] if r.detected_type else "?"
+            folder = r.folder_name[:35]
+            
+            if r.selected_match:
+                match = f"→ {r.selected_match.title} ({r.selected_match.year})"
+            elif r.matches:
+                match = f"→ [{len(r.matches)} matches]"
+            elif r.error:
+                match = f"→ {r.error}"
+            else:
+                match = ""
+            
+            print(f"  {i:>3}  {status:>2}  {mtype:>4}  {folder:<35}  {match[:25]}")
+
     def _build_series_batch_preview(
         self,
         results: list[ScanResult],
@@ -2236,22 +2253,130 @@ class MediaRenamer:
                         continue
 
                     renamed = 0
-                    for item in list(working.iterdir()):
+                    skipped = 0
+                    
+                    # Get all video files and sort by size (largest first)
+                    video_files = [f for f in working.iterdir() if f.is_file() and f.suffix.lower() in self.VIDEO_EXT]
+                    video_files.sort(key=lambda x: x.stat().st_size, reverse=True)
+                    
+                    # Handle empty video files case
+                    if not video_files:
+                        print(f"     ⚠️  No video files found in {working.name}")
+                        continue
+                    
+                    # Identify the main movie (largest video file)
+                    main_movie = video_files[0]
+                    
+                    # First pass: handle non-video files and main movie
+                    for item in working.iterdir():
                         if not item.is_file():
                             continue
                         ext = item.suffix.lower()
+                        
+                        # Skip video files in first pass (handled separately)
+                        if ext in self.VIDEO_EXT:
+                            continue
+                        
                         new_fn = None
                         if ext in self.RENAME_EXT:
                             new_fn = f"{new_name}{ext}"
                         elif ext in self.SUB_EXT:
                             new_fn = f"{new_name}{self._sub_lang(item.name)}{ext}"
+                        
                         if new_fn and item.name != new_fn:
                             target = working / new_fn
                             if not target.exists():
                                 self._do_rename(item, target)
                                 renamed += 1
+                            else:
+                                skipped += 1
+                    
+                    # Second pass: handle video files - main movie gets priority
+                    for item in video_files:
+                        ext = item.suffix.lower()
+                        is_main_movie = (item == main_movie)
+                        
+                        new_fn = f"{new_name}{ext}"
+                        
+                        if item.name == new_fn:
+                            # File already has correct name
+                            if not is_main_movie and main_movie:
+                                # Smaller video file has the correct name - this is wrong!
+                                try:
+                                    size_mb = item.stat().st_size / MB
+                                    main_size_mb = main_movie.stat().st_size / MB
+                                    print(f"     ⚠️  Wrong file has target name: {item.name} ({size_mb:.1f}MB) < main movie ({main_size_mb:.1f}MB)")
+                                    print(f"        Main movie: {main_movie.name}")
+                                except OSError:
+                                    pass  # File may have been deleted, skip warning
+                            continue
+                        
+                        target = working / new_fn
+                        if not target.exists():
+                            if not is_main_movie:
+                                # Warn about smaller video files
+                                try:
+                                    size_mb = item.stat().st_size / MB
+                                    main_size_mb = main_movie.stat().st_size / MB if main_movie else 0
+                                    print(f"     ⚠️  Smaller video file: {item.name} ({size_mb:.1f}MB) vs main ({main_size_mb:.1f}MB)")
+                                except OSError:
+                                    pass  # File may have been deleted, skip warning
+                            self._do_rename(item, target)
+                            renamed += 1
+                        else:
+                            # Target exists - check if we should swap
+                            if is_main_movie:
+                                # Main movie should get the correct name - swap with smaller file
+                                smaller_file = target
+                                main_file = item
+                                main_size = main_file.stat().st_size
+                                smaller_size = smaller_file.stat().st_size
+                                
+                                # Validate: warn if sizes are too close (main might not be main)
+                                size_ratio = main_size / smaller_size if smaller_size > 0 and main_size > 0 else 0
+                                if size_ratio > 0 and size_ratio < MAIN_MOVIE_SIZE_RATIO:
+                                    print(f"     ⚠️  Size difference small ({main_size/MB:.1f}MB vs {smaller_size/MB:.1f}MB) - may not be main movie")
+                                
+                                # Swap: rename smaller to temp, main to target, smaller to main's old name
+                                # Use smaller file's extension for temp name
+                                temp_ext = smaller_file.suffix
+                                temp_name = working / f".tmp_swap_{int(time.time() * 1000)}{temp_ext}"
+                                
+                                # Atomic swap with rollback on failure
+                                swap_success = False
+                                try:
+                                    self._do_rename(smaller_file, temp_name)
+                                    self._do_rename(main_file, target)
+                                    self._do_rename(temp_name, working / main_file.name)
+                                    swap_success = True
+                                except Exception as e:
+                                    # Rollback: try to restore original state
+                                    print(f"     ❌ Swap failed: {e}")
+                                    if temp_name.exists():
+                                        # Temp was created, try to restore smaller_file
+                                        try:
+                                            os.rename(temp_name, smaller_file)
+                                        except Exception:
+                                            pass  # Rollback failed, log for manual recovery
+                                    if target.exists() and not main_file.exists():
+                                        # main_file was already renamed to target, try to restore
+                                        try:
+                                            os.rename(target, main_file)
+                                        except Exception:
+                                            pass  # Rollback failed, log for manual recovery
+                                    raise RenameError(f"Swap failed and rollback attempted: {e}")
+                                
+                                if swap_success:
+                                    print(f"     🔄 Swapped: {main_file.name} ({main_size/MB:.1f}MB) -> {target.name}")
+                                    print(f"        {smaller_file.name} ({smaller_size/MB:.1f}MB) -> {main_file.name}")
+                                    renamed += 2  # Two files were swapped
+                                    self._commit()
+                                    result.status = MatchStatus.RENAMED
+                            else:
+                                skipped += 1
 
-                    print(f"     ✅ Folder + {renamed} files renamed")
+                    print(f"     ✅ Folder + {renamed} files renamed" + (f" (skipped {skipped} duplicates)" if skipped else ""))
+                    ok += 1
 
                 else:
                     new_dir = result.path.parent / new_name

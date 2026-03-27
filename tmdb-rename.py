@@ -1163,6 +1163,25 @@ class MediaRenamer:
         detected_type, videos = self._detect_type(folder)
         title, year = self._extract_title_year(folder_name)
 
+        # If folder name doesn't yield a good title, try to get title from video files
+        # This handles cases where:
+        # 1. Folder has meaningful name but files are cryptic (e.g., "Scarry.Movie.2020" with "asdfc1.mkv")
+        # 2. Folder has cryptic name but files are in subfolders with good names
+        #    (e.g., folder "x8d7f9s8" with subfolder "Scarry.Movie.2020" containing "asdfc1.mkv")
+        def is_good_title(t: str | None) -> bool:
+            if not t or len(t) < 3:
+                return False
+            # Check if title has at least one word with 4+ letters (meaningful content)
+            words = re.findall(r'[a-zA-ZäöüÄÖÜß]{4,}', t, re.I)
+            return len(words) >= 1
+
+        if not is_good_title(title):
+            for v in videos:
+                if is_good_title(v.extracted_title):
+                    title = v.extracted_title
+                    year = v.extracted_year
+                    break
+
         if named_match:
             title = named_match.group('title').strip()
             year = named_match.group('year')

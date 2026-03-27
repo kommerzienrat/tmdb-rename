@@ -1164,16 +1164,17 @@ class MediaRenamer:
         title, year = self._extract_title_year(folder_name)
 
         # If folder name doesn't yield a good title, try to get title from video files
-        # This handles cases where:
-        # 1. Folder has meaningful name but files are cryptic (e.g., "Scarry.Movie.2020" with "asdfc1.mkv")
-        # 2. Folder has cryptic name but files are in subfolders with good names
-        #    (e.g., folder "x8d7f9s8" with subfolder "Scarry.Movie.2020" containing "asdfc1.mkv")
+        # Check if extracted title is usable for TMDb search
         def is_good_title(t: str | None) -> bool:
             if not t or len(t) < 3:
                 return False
-            # Check if title has at least one word with 4+ letters (meaningful content)
-            words = re.findall(r'[a-zA-ZäöüÄÖÜß]{4,}', t, re.I)
-            return len(words) >= 1
+            # Must have at least one word with 5+ letters AND at least 2 words total
+            words = re.findall(r'[a-zA-ZäöüÄÖÜß]{5,}', t, re.I)
+            if len(words) < 1:
+                return False
+            # Also check for at least 2 words (real titles usually have multiple words)
+            word_count = len(t.split())
+            return word_count >= 2
 
         if not is_good_title(title):
             for v in videos:
@@ -1239,7 +1240,7 @@ class MediaRenamer:
         if detected_type == MediaType.COLLECTION:
             result.status = MatchStatus.MANUAL
             result.error = f"Collection ({len(videos)} films)"
-            result.collection_items = self._prepare_collection_items(videos)
+            result.collection_items = self._prepare_collection_items(videos, folder_name)
             return result
 
         if not title:
@@ -1281,12 +1282,60 @@ class MediaRenamer:
 
         return result
 
-    def _prepare_collection_items(self, videos: list[VideoFile]) -> list[CollectionItem]:
+    def _prepare_collection_items(self, videos: list[VideoFile], collection_folder_name: str | None = None) -> list[CollectionItem]:
         items: list[CollectionItem] = []
+
+        # Helper to check if title is usable (not just any 5+ letter string)
+        def is_good_title(t: str | None) -> bool:
+            if not t or len(t) < 3:
+                return False
+            # Must have at least one word with 5+ letters AND at least 2 words total
+            words = re.findall(r'[a-zA-ZäöüÄÖÜß]{5,}', t, re.I)
+            if len(words) < 1:
+                return False
+            # Also check for at least 2 words (real titles usually have multiple words)
+            word_count = len(t.split())
+            return word_count >= 2
+
+        # Extract potential title from collection folder name
+        # e.g., "My.Movie.1-5" -> "My Movie" (remove "1-5" part)
+        collection_title = None
+        collection_year = None
+        if collection_folder_name:
+            raw_title, collection_year = self._extract_title_year(collection_folder_name)
+            if raw_title:
+                # Remove patterns like "1-5", "1", "2", "3" at the end that indicate collection numbers
+                # This converts "My Movie 1-5" to "My Movie"
+                collection_title = re.sub(r'\s+\d+(-\d+)?\s*$', '', raw_title).strip()
+                # If removal left only one word, use the original
+                if len(collection_title.split()) < 2:
+                    collection_title = raw_title
 
         for v in videos:
             title = v.extracted_title
             year = v.extracted_year
+
+            # If video has a parent folder with good name, use that
+            if v.parent_folder:
+                parent_title, parent_year = self._extract_title_year(v.parent_folder.name)
+                if is_good_title(parent_title):
+                    title = parent_title
+                    year = parent_year or year
+
+            # If title is not usable, try collection folder name
+            # e.g., "My.Awesome.Movie.1-5" with files "xyz1.mkv"
+            if not is_good_title(title) and is_good_title(collection_title):
+                # Try to extract movie number from filename (e.g., "xyz1" -> 1, "xyz2" -> 2)
+                filename_stem = v.path.stem
+                num_match = re.search(r'(\d+)$', filename_stem)
+                movie_number = num_match.group(1) if num_match else None
+                
+                if movie_number:
+                    # Create title with number: "My Movie" + " 1" = "My Movie 1"
+                    title = f"{collection_title} {movie_number}"
+                else:
+                    title = collection_title
+                year = collection_year or year
 
             matches = []
             if title:
